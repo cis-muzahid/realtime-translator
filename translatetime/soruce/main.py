@@ -1,15 +1,14 @@
 import os
 import time
-import pygame
 from gtts import gTTS
 import streamlit as st
 import speech_recognition as sr
 from googletrans import LANGUAGES, Translator
+from playsound import playsound
 
 isTranslateOn = False
 
 translator = Translator() # Initialize the translator module.
-pygame.mixer.init()  # Initialize the mixer module.
 
 # Create a mapping between language names and language codes
 language_mapping = {name: code for code, name in LANGUAGES.items()}
@@ -18,21 +17,18 @@ def get_language_code(language_name):
     return language_mapping.get(language_name, language_name)
 
 def translator_function(spoken_text, from_language, to_language):
-    return translator.translate(spoken_text, src='{}'.format(from_language), dest='{}'.format(to_language))
+    return translator.translate(spoken_text, src=from_language, dest=to_language)
 
 def text_to_voice(text_data, to_language):
-    myobj = gTTS(text=text_data, lang='{}'.format(to_language), slow=False)
+    myobj = gTTS(text=text_data, lang=to_language, slow=False)
     myobj.save("cache_file.mp3")
-    audio = pygame.mixer.Sound("cache_file.mp3")  # Load a sound.
-    audio.play()
+    playsound("cache_file.mp3")  # Play the audio file.
     os.remove("cache_file.mp3")
 
 def main_process(output_placeholder, from_language, to_language):
-    
     global isTranslateOn
     
     while isTranslateOn:
-
         rec = sr.Recognizer()
         with sr.Microphone() as source:
             output_placeholder.text("Listening...")
@@ -41,7 +37,7 @@ def main_process(output_placeholder, from_language, to_language):
         
         try:
             output_placeholder.text("Processing...")
-            spoken_text = rec.recognize_google(audio, language='{}'.format(from_language))
+            spoken_text = rec.recognize_google(audio, language=from_language)
             
             output_placeholder.text("Translating...")
             translated_text = translator_function(spoken_text, from_language, to_language)
