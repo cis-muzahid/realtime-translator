@@ -1,80 +1,99 @@
-import streamlit as st
-import speech_recognition as sr
-from googletrans import LANGUAGES, Translator
-from gtts import gTTS
+import logging
+import queue
 from io import BytesIO
-from streamlit_webrtc import webrtc_streamer, AudioProcessorBase, WebRtcMode
+import streamlit as st
+from streamlit_webrtc import WebRtcMode, webrtc_streamer
+import speech_recognition as sr
+from googletrans import Translator, LANGUAGES
+from gtts import gTTS
 import av
 
-# Initialize translator
+# Set up logging
+logger = logging.getLogger(__name__)
 translator = Translator()
 
-# Create a mapping between language names and language codes
+# Mapping language names to codes
 language_mapping = {name: code for code, name in LANGUAGES.items()}
 
 def get_language_code(language_name):
     return language_mapping.get(language_name, language_name)
 
-# Translate the spoken text
-def translator_function(spoken_text, from_language, to_language):
-    return translator.translate(spoken_text, src=from_language, dest=to_language).text
+# Translate speech
+def translate_text(text, src_lang, dest_lang):
+    try:
+        translated = translator.translate(text, src=src_lang, dest=dest_lang)
+        return translated.text
+    except Exception as e:
+        logger.error(f"Translation error: {e}")
+        return "Translation Error"
 
-# Generate and play voice output smoothly using gTTS
-def text_to_voice(text_data, to_language):
-    tts = gTTS(text=text_data, lang=to_language, slow=False)
+# Convert text to speech and play
+def text_to_speech(text, language):
+    speech = gTTS(text=text, lang=language, slow=False)
     speech_buffer = BytesIO()
-    tts.write_to_fp(speech_buffer)
+    speech.write_to_fp(speech_buffer)
     speech_buffer.seek(0)
-    st.audio(speech_buffer, format="audio/mp3")
+    return speech_buffer
 
-# Audio processor for real-time speech recognition
-class SpeechRecognizerProcessor(AudioProcessorBase):
-    def __init__(self, from_language, to_language):
-        self.recognizer = sr.Recognizer()
-        self.from_language = from_language
-        self.to_language = to_language
+# Speech recognition callback
+result_queue = queue.Queue()
 
-    def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
-        output_placeholder = st.session_state.output_placeholder
+def audio_frame_callback(frame: av.AudioFrame) -> av.AudioFrame:
+    recognizer = sr.Recognizer()
+    audio_data = frame.to_ndarray()
 
-        audio_data = frame.to_ndarray()
-        audio = sr.AudioData(audio_data.tobytes(), frame.sample_rate, 2)
-
+    with sr.AudioFile(BytesIO(audio_data)) as source:
         try:
-            spoken_text = self.recognizer.recognize_google(audio, language=self.from_language)
-            output_placeholder.text(f"🗣️ You said: {spoken_text}")
-
-            translated_text = translator_function(spoken_text, self.from_language, self.to_language)
-            output_placeholder.text(f"🔊 Translation: {translated_text}")
-
-            text_to_voice(translated_text, self.to_language)
-
+            audio = recognizer.record(source)
+            text = recognizer.recognize_google(audio, language=st.session_state.from_language)
+            result_queue.put(text)
         except Exception as e:
-            pass
+            logger.error(f"Speech recognition error: {e}")
 
-        return frame
+    return frame
 
 # UI layout
-st.title("🗣️ Real-time Voice Translator (Streamlit Cloud)")
+st.title("🗣️ Real-time Voice Translator")
 
-from_language_name = st.selectbox("Select Source Language:", list(LANGUAGES.values()), index=21)
-to_language_name = st.selectbox("Select Target Language:", list(LANGUAGES.values()), index=32)
+# Language selection
+from_language_name = st.selectbox("Select Source Language:", list(LANGUAGES.values()), index=list(LANGUAGES.values()).index("english"))
+to_language_name = st.selectbox("Select Target Language:", list(LANGUAGES.values()), index=list(LANGUAGES.values()).index("spanish"))
 
-from_language = get_language_code(from_language_name)
-to_language = get_language_code(to_language_name)
+# Store language codes
+st.session_state.from_language = get_language_code(from_language_name)
+st.session_state.to_language = get_language_code(to_language_name)
 
-if "output_placeholder" not in st.session_state:
-    st.session_state.output_placeholder = st.empty()
+if "isTranslating" not in st.session_state:
+    st.session_state.isTranslating = False
 
-if "isTranslateOn" not in st.session_state:
-    st.session_state.isTranslateOn = False
+# Start and stop buttons
+if st.button("Start Translation"):
+    st.session_state.isTranslating = True
 
-if st.button("Start"):
-    st.session_state.isTranslateOn = True
-    webrtc_streamer(key="speech_translator",
-                    mode=WebRtcMode.SENDONLY,
-                    audio_processor_factory=lambda: SpeechRecognizerProcessor(from_language, to_language))
+if st.button("Stop Translation"):
+    st.session_state.isTranslating = False
+    st.warning("🛑 Translation Stopped")
 
-if st.button("Stop"):
-    st.session_state.isTranslateOn = False
-    st.warning("🛑 Translation Stopped.")
+if st.session_state.isTranslating:
+    webrtc_ctx = webrtc_streamer(
+        key="speech-to-text",
+        mode=WebRtcMode.SENDRECV,
+        media_stream_constraints={"audio": True, "video": False},
+        audio_frame_callback=audio_frame_callback,
+        async_processing=True,
+    )
+
+    output_placeholder = st.empty()
+
+    while st.session_state.isTranslating:
+        if not result_queue.empty():
+            recognized_text = result_queue.get()
+
+            if recognized_text:
+                output_placeholder.text(f"🗣️ You said: {recognized_text}")
+
+                translated_text = translate_text(recognized_text, st.session_state.from_language, st.session_state.to_language)
+                output_placeholder.text(f"🔊 Translation: {translated_text}")
+
+                speech_audio = text_to_speech(translated_text, st.session_state.to_language)
+                st.audio(speech_audio, format="audio/mp3")
